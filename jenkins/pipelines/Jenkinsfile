@@ -1,0 +1,222 @@
+// ==============================================================
+// Jenkinsfile — Main CI/CD Pipeline
+// Stages: Checkout → Install → Test → SonarQube → Build →
+//         Security Scan → Push to Nexus → Deploy → Verify
+// ==============================================================
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME       = 'devops-toolchain-app'
+        APP_VERSION    = "${env.BUILD_NUMBER}"
+        DOCKER_IMAGE   = "${APP_NAME}:${APP_VERSION}"
+        DOCKER_LATEST  = "${APP_NAME}:latest"
+        SONAR_PROJECT  = 'devops-toolchain'
+        NEXUS_URL      = credentials('nexus-url')
+        SONAR_TOKEN    = credentials('sonarqube-token')
+    }
+
+    stages {
+
+        stage('📋 Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    echo "Branch: ${GIT_BRANCH}"
+                    echo "Commit: ${GIT_COMMIT}"
+                    echo "Build:  ${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('🔧 Install Dependencies') {
+            steps {
+                dir('app') {
+                    sh '''
+                        python3 -m venv venv
+                        . venv/bin/activate
+                        pip install --upgrade pip
+                        pip install -r requirements.txt
+                        echo "Dependencies installed successfully"
+                    '''
+                }
+            }
+        }
+
+        stage('🧪 Unit Tests') {
+            steps {
+                dir('app') {
+                    sh '''
+                        . venv/bin/activate
+                        pytest tests/ \
+                            -v \
+                            --cov=src \
+                            --cov-report=xml:coverage.xml \
+                            --cov-report=html:coverage-html \
+                            --junitxml=test-results.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit 'app/test-results.xml'
+                    publishHTML([
+                        reportDir: 'app/coverage-html',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report'
+                    ])
+                }
+            }
+        }
+
+        stage('🔍 SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        sonar-scanner \
+                            -Dsonar.projectKey=${SONAR_PROJECT} \
+                            -Dsonar.projectName="${APP_NAME}" \
+                            -Dsonar.sources=app/src \
+                            -Dsonar.tests=app/tests \
+                            -Dsonar.python.coverage.reportPaths=app/coverage.xml \
+                            -Dsonar.host.url=${SONAR_HOST_URL} \
+                            -Dsonar.login=${SONAR_TOKEN}
+                    '''
+                }
+            }
+        }
+
+        stage('⏳ Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('🐳 Build Docker Image') {
+            steps {
+                dir('app') {
+                    sh '''
+                        docker build \
+                            --target production \
+                            --build-arg APP_VERSION=${APP_VERSION} \
+                            -t ${DOCKER_IMAGE} \
+                            -t ${DOCKER_LATEST} \
+                            .
+                        echo "Image built: ${DOCKER_IMAGE}"
+                        docker images | grep ${APP_NAME}
+                    '''
+                }
+            }
+        }
+
+        stage('🔒 Security Scan') {
+            steps {
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:latest image \
+                        --exit-code 0 \
+                        --severity HIGH,CRITICAL \
+                        --format table \
+                        ${DOCKER_IMAGE}
+                '''
+            }
+        }
+
+        stage('📦 Push to Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-credentials',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASS'
+                )]) {
+                    sh '''
+                        docker login ${NEXUS_URL} -u ${NEXUS_USER} -p ${NEXUS_PASS}
+                        docker tag ${DOCKER_IMAGE} ${NEXUS_URL}/${DOCKER_IMAGE}
+                        docker tag ${DOCKER_LATEST} ${NEXUS_URL}/${DOCKER_LATEST}
+                        docker push ${NEXUS_URL}/${DOCKER_IMAGE}
+                        docker push ${NEXUS_URL}/${DOCKER_LATEST}
+                        echo "Pushed to Nexus: ${NEXUS_URL}/${DOCKER_IMAGE}"
+                    '''
+                }
+            }
+        }
+
+        stage('🚀 Deploy to Staging') {
+            steps {
+                sh '''
+                    docker rm -f ${APP_NAME}-staging 2>/dev/null || true
+                    docker run -d \
+                        --name ${APP_NAME}-staging \
+                        --network devops-network \
+                        -e FLASK_ENV=staging \
+                        -e APP_VERSION=${APP_VERSION} \
+                        -p 5001:5000 \
+                        ${DOCKER_IMAGE}
+                    echo "Deployed to staging on port 5001"
+                '''
+            }
+        }
+
+        stage('✅ Verify Deployment') {
+            steps {
+                sh '''
+                    sleep 10
+                    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/health)
+                    if [ "$HTTP_STATUS" = "200" ]; then
+                        echo "✅ Staging deployment verified (HTTP $HTTP_STATUS)"
+                    else
+                        echo "❌ Staging health check failed (HTTP $HTTP_STATUS)"
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        stage('🏭 Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    docker rm -f ${APP_NAME}-prod 2>/dev/null || true
+                    docker run -d \
+                        --name ${APP_NAME}-prod \
+                        --network devops-network \
+                        -e FLASK_ENV=production \
+                        -e APP_VERSION=${APP_VERSION} \
+                        -p 5000:5000 \
+                        ${DOCKER_IMAGE}
+                    echo "Deployed to production on port 5000"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            ✅ Pipeline SUCCESSFUL
+            App: ${APP_NAME}
+            Version: ${APP_VERSION}
+            Branch: ${GIT_BRANCH}
+            """
+        }
+        failure {
+            echo "❌ Pipeline FAILED — check logs above"
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

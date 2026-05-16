@@ -1,0 +1,48 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install flask==3.0.0 werkzeug==3.0.1 pytest==7.4.4 pytest-cov==4.1.0
+      - name: Test
+        run: cd app && python -m pytest tests/test_app.py -v
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t devops-toolchain:latest app/
+      - name: Health check
+        run: |
+          docker run -d --name app-test -p 5000:5000 devops-toolchain:latest
+          sleep 10
+          curl -sf http://localhost:5000/health && echo "OK"
+          docker stop app-test
+
+  validate:
+    name: Validate Files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check files
+        run: |
+          ls app/src/
+          ls jenkins/pipelines/
+          ls docker/
+          echo "All files present"

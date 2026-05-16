@@ -1,0 +1,49 @@
+// ==============================================================
+// Jenkinsfile.pr — Pull Request Validation Pipeline
+// Lighter pipeline for PRs: no deploy, just test + scan
+// ==============================================================
+
+pipeline {
+    agent any
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+        stage('📋 Checkout') {
+            steps { checkout scm }
+        }
+
+        stage('🧪 Test') {
+            steps {
+                dir('app') {
+                    sh '''
+                        pip install -r requirements.txt
+                        pytest tests/ -v --cov=src --cov-report=xml --junitxml=test-results.xml
+                    '''
+                }
+            }
+            post {
+                always { junit 'app/test-results.xml' }
+            }
+        }
+
+        stage('🔍 SonarQube') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        sonar-scanner \
+                            -Dsonar.projectKey=devops-toolchain-pr \
+                            -Dsonar.sources=app/src \
+                            -Dsonar.python.coverage.reportPaths=app/coverage.xml
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always { cleanWs() }
+    }
+}

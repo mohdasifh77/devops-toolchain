@@ -1,0 +1,77 @@
+# ==============================================================
+# Jenkins Configuration as Code (JCasC)
+# Auto-configures Jenkins on first startup
+# ==============================================================
+
+jenkins:
+  systemMessage: "🚀 DevOps Toolchain — Jenkins CI/CD Platform"
+  numExecutors: 4
+  mode: NORMAL
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "admin123"
+          properties:
+            - "apiToken"
+            - mailer:
+                emailAddress: "admin@devops-toolchain.local"
+
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: "SONARQUBE_URL"
+            value: "http://sonarqube:9000"
+          - key: "NEXUS_URL"
+            value: "http://nexus:8081"
+          - key: "APP_NAME"
+            value: "devops-toolchain-app"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "nexus-credentials"
+              username: "admin"
+              password: "admin123"
+              description: "Nexus Repository credentials"
+          - string:
+              scope: GLOBAL
+              id: "sonarqube-token"
+              secret: "squ_devops_toolchain_token"
+              description: "SonarQube authentication token"
+
+tool:
+  sonarRunnerInstallation:
+    installations:
+      - name: "SonarQube Scanner"
+        properties:
+          - installSource:
+              installers:
+                - sonarRunnerInstaller:
+                    id: "5.0.1.3006"
+
+  git:
+    installations:
+      - name: "Default"
+        home: "git"
+
+unclassified:
+  sonarGlobalConfiguration:
+    buildWrapperEnabled: true
+    installations:
+      - name: "SonarQube"
+        serverUrl: "http://sonarqube:9000"
+        credentialsId: "sonarqube-token"
+
+  location:
+    url: "http://localhost:8090/"
+    adminAddress: "admin@devops-toolchain.local"
